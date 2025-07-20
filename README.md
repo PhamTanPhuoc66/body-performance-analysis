@@ -68,7 +68,7 @@ Implemented and evaluated **6 classification algorithms**:
 
 **🔍 For detailed analysis and complete findings, check out our comprehensive report:**
 
-The **[main analysis notebook]([Group_21]_Project_CK_1_xldl.Rmd)** contains:
+The **[main analysis notebook]([Group_21]_Project_CK_1_xldl.html)** contains:
 - ✅ **Complete statistical analysis** with p-values and significance tests
 - ✅ **All visualizations** including correlation matrices, distribution plots, and model comparisons
 - ✅ **Detailed model evaluation** with confusion matrices and performance metrics
@@ -81,13 +81,19 @@ The **[main analysis notebook]([Group_21]_Project_CK_1_xldl.Rmd)** contains:
 ## 📄 Project Structure
 
 ```
-├── [Group_21]_Project_CK_1_xldl.Rmd    # 📋 Main analysis notebook (READ THIS!)
+├── [Group_21]_Project_CK_1_xldl.Rmd    # 📋 R Markdown source file
+├── [Group_21]_Project_CK_1_xldl.html   # 📊 Main analysis report (READ THIS!)
+├── Group21_finalProject.R             # 💻 R script with all analysis code
 ├── Group21_Project3_Description.png    # 🖼️ Project description
 ├── bodyPerformance.csv                 # 📊 Dataset
+├── project_report.pdf                 # 📑 Final project report
 └── README.md                          # 📖 Project overview
 ```
 
 ---
 
 *This project showcases comprehensive data science skills including EDA, statistical testing, data visualization, and machine learning model development.*
+
+
+
 

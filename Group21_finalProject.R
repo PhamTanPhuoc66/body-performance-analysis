@@ -1,0 +1,1390 @@
+library(tidyverse)
+library(dplyr)
+library(janitor)
+library(ggplot2)
+library(patchwork)
+library(lmPerm)
+library(klaR)
+library(MASS)
+library(nnet)
+library(caret) 
+library(gridExtra)
+library(boot)
+library(corrplot)
+#Đọc dữ liệu
+data <- read.csv('C:/Users/Nam/OneDrive/Documents/datasets/bodyPerformance.csv')
+#Làm sạch tên cột
+data = data |> clean_names()
+#Kiểm tra số lượng giá trị bị thiếu
+colSums(is.na(data))
+# Nhận thấy không có giá trị khuyết
+# Xử lý dữ liệu : 
+# Huyết áp tâm trương (diastolic) và tâm thu (systolic) không thể bằng 0 và
+# tâm trương phải nhỏ hơn tâm thu
+# Xử lý dữ liệu cột diastolic và systolic = 0 và diastolic >= systolic
+data <- data %>%
+  filter(diastolic != 0, systolic != 0, diastolic < systolic)
+
+# Xử lý dữ liệu cột grip_force và broad_jump_cm = 0
+data <- data %>%
+  filter(grip_force != 0, broad_jump_cm != 0)
+# Kiểm tra dữ liệu bị mất cân bằng
+# Tính tổng số các class trong data
+class_counts <- table(data$class)
+print(class_counts)
+
+# Tính tổng số nam và nữ trong data
+gender_counts <- table(data$gender)
+print(gender_counts)
+
+# Qua đó ta thấy được dữ liệu bị mất cân bằng cột giới tính (gender)
+# giữa nam và nữ (tỷ lệ 6.3 nam : 3.7 nữ) nhưng chưa tới mức quá lệch , nên ta vẫn sẽ dùng bộ dữ liệu ban đầu chứ không 
+# dùng các phương nhân bản dữ liệu 
+# Chuyển các biến `gender` và `class` sang kiểu factor
+data <- data %>%
+  mutate(
+    gender = as.factor(gender),
+    class = as.factor(class)
+  )
+
+#Tạo biến mới tính BMI
+data <- data %>%
+  mutate(bmi = weight_kg / (height_cm / 100)^2)
+
+# Phân loại BMI theo chuẩn WHO
+data <- data %>%
+  mutate(
+    bmi_category = case_when(
+      bmi < 18.5 ~ "Underweight",
+      bmi >= 18.5 & bmi < 25 ~ "Normal",
+      bmi >= 25 & bmi < 30 ~ "Overweight",
+      bmi >= 30 ~ "Obese"
+    )
+  )
+
+# Phân loại huyết áp dựa trên 2 biến diatolic và systolic
+data <- data %>%
+  mutate(
+    blood_pressure_category = case_when(
+      systolic < 90 & diastolic < 60 ~ "Hypotension", #Huyết áp thấp: systolic < 90 và diastolic < 60 mmHg
+      systolic < 120 & diastolic < 80 ~ "Normal", # Huyết áp bình thường: systolic< 120 và diastolic < 80 mmHg
+      systolic >= 120 & systolic < 130 & diastolic < 80 ~ "Elevated", #Huyết áp cao
+      systolic >= 130 & systolic < 140 | diastolic >= 80 & diastolic < 90 ~ "Hypertension Stage 1", #Huyết áp cao giai đoạn 1
+      systolic >= 140 | diastolic >= 90 ~ "Hypertension Stage 2", #Huyết ́ pao giai đoạn 2
+      systolic > 180 | diastolic > 120 ~ "Hypertensive Crisis" #Huyết áp ở mức nguy hiểm
+    )
+  )
+
+# Chuyển các biến `bmi_category` và `blood_pressure_category` sang kiểu factor
+data <- data %>%
+  mutate(
+    bmi_category = as.factor(bmi_category),
+    blood_pressure_category = as.factor(blood_pressure_category)
+  )
+########################
+data <- data %>%
+  mutate(
+    # Fitness Score dựa trên các yếu tố thể lực
+    fitness_score = sit_ups_counts * 0.4 + grip_force * 0.3 + broad_jump_cm * 0.3,
+    # Hiệu số huyết áp
+    pulse_pressure = systolic - diastolic,
+  )
+################
+glimpse(data)
+
+########################    Mô tả và biểu diễn tổng hợp dữ liệu
+library(stringr)
+
+# Tóm tắt dữ liệu cơ bản
+summary(data)
+
+######### PHẦN 1 : BẢNG TỔNG HỢP VÀ MỘT VÀI BIỂU ĐỒ TRỰC QUAN DỮ LIỆU ĐỒNG THỜI ÁP DỤNG A/B TESTINGS ĐỂ KIỂM ĐỊNH CÁC GIẢ THUYẾT CẦN THIẾT
+
+
+
+# Tóm tắt dữ liệu theo nhóm phân loại gender
+# Tính toán thống kê cho dữ liệu theo giới tính
+pivot_gender <- data %>%
+  group_by(gender) %>%
+  summarise(
+    mean_height = mean(height_cm, na.rm = TRUE),
+    sd_height = sd(height_cm, na.rm = TRUE),
+    mean_weight = mean(weight_kg, na.rm = TRUE),
+    sd_weight = sd(weight_kg, na.rm = TRUE),
+    mean_body_fat = mean(body_fat, na.rm = TRUE),
+    sd_body_fat = sd(body_fat, na.rm = TRUE),
+    mean_diastolic = mean(diastolic, na.rm = TRUE),
+    sd_diastolic = sd(diastolic, na.rm = TRUE),
+    mean_systolic = mean(systolic, na.rm = TRUE),
+    sd_systolic = sd(systolic, na.rm = TRUE),
+    mean_grip_force = mean(grip_force, na.rm = TRUE),
+    sd_grip_force = sd(grip_force, na.rm = TRUE),
+    mean_sit_and_bend_forward = mean(sit_and_bend_forward_cm, na.rm = TRUE),
+    sd_sit_and_bend_forward = sd(sit_and_bend_forward_cm, na.rm = TRUE),
+    mean_sit_ups = mean(sit_ups_counts, na.rm = TRUE),
+    sd_sit_ups = sd(sit_ups_counts, na.rm = TRUE),
+    mean_broad_jump = mean(broad_jump_cm, na.rm = TRUE),
+    sd_broad_jump = sd(broad_jump_cm, na.rm = TRUE),
+    mean_bmi = mean(bmi, na.rm = TRUE),
+    sd_bmi = sd(bmi, na.rm = TRUE),
+    mean_fitness_score = mean(fitness_score, na.rm = TRUE),
+    sd_fitness_score = sd(fitness_score, na.rm = TRUE)
+  )
+# Tóm tắt dữ liệu theo nhóm phân loại class
+
+pivot_class <- data %>%
+  group_by(class) %>%
+  summarise(
+    mean_height = mean(height_cm, na.rm = TRUE),
+    sd_height = sd(height_cm, na.rm = TRUE),
+    mean_weight = mean(weight_kg, na.rm = TRUE),
+    sd_weight = sd(weight_kg, na.rm = TRUE),
+    mean_body_fat = mean(body_fat, na.rm = TRUE),
+    sd_body_fat = sd(body_fat, na.rm = TRUE),
+    mean_diastolic = mean(diastolic, na.rm = TRUE),
+    sd_diastolic = sd(diastolic, na.rm = TRUE),
+    mean_systolic = mean(systolic, na.rm = TRUE),
+    sd_systolic = sd(systolic, na.rm = TRUE),
+    mean_grip_force = mean(grip_force, na.rm = TRUE),
+    sd_grip_force = sd(grip_force, na.rm = TRUE),
+    mean_sit_and_bend_forward = mean(sit_and_bend_forward_cm, na.rm = TRUE),
+    sd_sit_and_bend_forward = sd(sit_and_bend_forward_cm, na.rm = TRUE),
+    mean_sit_ups = mean(sit_ups_counts, na.rm = TRUE),
+    sd_sit_ups = sd(sit_ups_counts, na.rm = TRUE),
+    mean_broad_jump = mean(broad_jump_cm, na.rm = TRUE),
+    sd_broad_jump = sd(broad_jump_cm, na.rm = TRUE),
+    mean_bmi = mean(bmi, na.rm = TRUE),
+    sd_bmi = sd(bmi, na.rm = TRUE),
+    mean_fitness_score = mean(fitness_score, na.rm = TRUE),
+    sd_fitness_score = sd(fitness_score, na.rm = TRUE)
+  )
+
+
+###################################Tạo bảng tổng hợp các biến
+df_sum <- data %>%
+  summarise(across(c(age, height_cm, weight_kg, body_fat, diastolic, systolic, grip_force, 
+                     sit_and_bend_forward_cm, sit_ups_counts, broad_jump_cm ,bmi, fitness_score ,pulse_pressure),
+                   list(gtnn = ~min(., na.rm = TRUE),
+                        gtln = ~max(., na.rm = TRUE),
+                        tv = ~median(., na.rm = TRUE),
+                        tb = ~mean(., na.rm = TRUE),
+                        dlc = ~sd(., na.rm = TRUE))))
+
+# Chuyển đổi và tách tên biến, giá trị thống kê
+df_stats_tidy <- df_sum %>%
+  pivot_longer(cols = everything(), names_to = "ten", values_to = "gt") %>% 
+  separate(ten, into = c("bien", "stat"), sep = "_(?=[^_]+$)") %>% 
+  pivot_wider(names_from = stat, values_from = gt)
+# Kết quả
+print(df_stats_tidy)
+print(pivot_gender)
+print(pivot_class)
+# Phát hiện giá trị sit_and_bend_forward_cm = 213 là không hợp lí , vì giá trị cao nhất của chỉ số này chỉ thường ở mức >46cm và <50cm
+
+
+# Loại bỏ các giá trị > 50cm trong cột sit_and_bend_forward_cm
+data <- data[data$sit_and_bend_forward_cm <= 50, ]
+# xem lại kết quả : 
+df_sum <- data %>%
+  summarise(across(c(age, height_cm, weight_kg, body_fat, diastolic, systolic, grip_force, 
+                     sit_and_bend_forward_cm, sit_ups_counts, broad_jump_cm ,bmi, fitness_score ,pulse_pressure),
+                   list(gtnn = ~min(., na.rm = TRUE),
+                        gtln = ~max(., na.rm = TRUE),
+                        tv = ~median(., na.rm = TRUE),
+                        tb = ~mean(., na.rm = TRUE),
+                        dlc = ~sd(., na.rm = TRUE))))
+
+# Chuyển đổi và tách tên biến, giá trị thống kê
+df_stats_tidy <- df_sum %>%
+  pivot_longer(cols = everything(), names_to = "ten", values_to = "gt") %>% 
+  separate(ten, into = c("bien", "stat"), sep = "_(?=[^_]+$)") %>% 
+  pivot_wider(names_from = stat, values_from = gt)
+
+print(df_stats_tidy)
+
+
+
+### Vẽ một vài biểu đồ trực quan nhằm khai thác một số khía cạnh của dữ liệu 
+# Tạo boxplot cho từng biến 
+numeric_cols <- dplyr::select(data, age, height_cm, weight_kg, body_fat, 
+                       diastolic, systolic, grip_force, sit_and_bend_forward_cm,
+                       sit_ups_counts, broad_jump_cm, bmi, fitness_score, pulse_pressure)
+
+
+# Kiểm tra phân phối cho từng biến bằng histogram
+plots <- list()
+for (col in names(numeric_cols)) {
+  plot <- ggplot(data, aes_string(x = col)) +
+    geom_histogram(binwidth = 2, fill = "blue", color = "white") +
+    labs(
+      title = paste("Phân bố của", col),
+      x = col,
+      y = "Tần số"
+    ) +
+    theme_minimal()
+  plots[[col]] <- plot
+}
+
+# Ghép tất cả các biểu đồ histogram thành một hình
+combined_plot <- wrap_plots(plots, ncol = 3)  # Số cột, ví dụ 3
+print(combined_plot)
+
+
+#So sánh giữa các nhóm
+############################### Theo giới tính 
+#1.grip_force dựa trên class và gender
+ggplot(data, aes(x = class, y = grip_force, fill = gender)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(title = "Lực kẹp trung bình theo nhóm hiệu suất và giới tính", 
+       x = "Nhóm hiệu suất", y = "Lực kẹp (kg)") +
+  theme_minimal()
+##### Nhận xét : Chỉ số lực kẹp ở nam giới nhìn chung tốt hơn nữ giới . Chỉ số này tăng đều theo phân lớp hiệu quả (class)
+
+# Hàm permutation test với 2 nhóm
+perm_fun <- function(x, nA, nB, R) {
+  n <- nA + nB
+  mean_diff <- numeric(R)
+  for (i in 1:R){
+    idx_a <- sample(x = 1:n, size = nA)
+    idx_b <- setdiff(x = 1:n, y = idx_a)
+    mean_diff[i] <- mean(x[idx_a]) - mean(x[idx_b])
+  }
+  return(mean_diff)
+}
+class_counts <- table(data$class)
+print(class_counts)
+
+# Tính tổng số nam và nữ trong data
+gender_counts <- table(data$gender)
+print(gender_counts)
+# Để kiểm tra xem nhận xét mang ý nghĩa thống kê hay chỉ là kết quả của sự ngẫu nhiên , ta thực hiện các kiểm định sau : 
+# H0: Không có sự khác biệt đáng kể về lực kẹp trung bình giữa nam và nữ
+# H1: Lực kẹp trung bình ở nữ yếu hơn nam
+diff_h1 <- perm_fun(x = data$grip_force, nA = 4916, nB = 8457, R = 1000)
+h1_mean_a <- mean(data$grip_force[data$gender == "F"])
+h1_mean_b <- mean(data$grip_force[data$gender == "M"])
+mean(diff_h1 < (h1_mean_a - h1_mean_b))
+# P-value = 0 
+# Với mức ý nghĩa alpha = 0.05 , p-value < alpha nên chấp nhận H1 : Lực kẹp trung bình ở nữ yếu hơn nam 
+# Kế tiếp ta có 
+# H0: Không có sự khác biệt đáng kể về lực kẹp trung bình giữa các nhóm hiệu suất.
+# H1: Có ít nhất một sự khác biệt đáng kể về lực kẹp trung bình giữa các nhóm hiệu suất.
+h1 <- aovp(formula = grip_force ~ class, data = data, perm = "Prob")
+summary(h1)
+# p-value = 2.2e-16
+# Với mức ý nghĩa alpha = 0.05 , p-val < alpha nên ta chấp nhận H1 : Có ít nhất một sự khác biệt đáng kể về lực kẹp trung bình giữa các nhóm hiệu suất.
+# Vậy kết luận nhận xét ban đầu là chính xác và mang ý nghĩa thống kê
+
+
+
+
+
+#2.heigh_cm dựa trên bmi_category và gender
+ggplot(data, aes(x = bmi_category, y = height_cm, fill = gender)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(title = "Chiều cao trung bình theo phân loại BMI và giới tính", 
+       x = "Phân loại BMI", y = "Chiều cao (cm)") +
+  theme_minimal()
+##### Nhận xét : Chiều cao trung bình ở nam giới trong cả 4 phân nhóm BMI là gần như ngang nhau và tốt hơn nữ giới , trong đó nhóm Underweight có chỉ số 
+# chiều cao kém hơn một chút . Ở nữ giới thì 2 nhóm Obese và Overweight thì lại có chiều cao trung bình thấp hơn so với 2 nhóm Normal và Underweight
+# Để kiểm tra xem nhận xét mang ý nghĩa thống kê hay chỉ là kết quả của sự ngẫu nhiên , ta thực hiện các kiểm định sau : 
+# H0: Không có sự khác biệt đáng kể về chiều cao trung bình giữa nam và nữ
+# H1: chiều cao trung bình ở nữ thấp hơn nam
+diff_h2 <- perm_fun(x = data$height_cm, nA = 4916, nB = 8457, R = 1000)
+h2_mean_a <- mean(data$height_cm[data$gender == "F"])
+h2_mean_b <- mean(data$height_cm[data$gender == "M"])
+mean(diff_h2 < (h2_mean_a - h2_mean_b))
+# P-value = 0 
+# Với mức ý nghĩa alpha = 0.05 , p-value < alpha nên chấp nhận H1 : chiều cao trung bình ở nữ thấp hơn nam
+# Kế tiếp ta có : 
+#H0: Không có sự khác biệt về chiều cao trung bình giữa các nhóm BMI ở nam giới.
+#H1: Có ít nhất một nhóm BMI có chiều cao trung bình khác biệt ở nam giới.
+# Lọc dữ liệu chỉ lấy nam giới
+data_male <- subset(data, gender == 'M')
+h2 <- aovp(formula = height_cm ~ bmi_category, data = data_male, perm = "Prob")
+summary(h2)
+#P-val =  0.8924
+# Với mức ý nghĩa alpha = 0.05 ,p-val > alpha nên chấp nhận H0 : Không có sự khác biệt về chiều cao trung bình giữa các nhóm BMI ở nam giới.
+# Kế tiếp ta có : 
+#H0: Không có sự khác biệt về chiều cao trung bình giữa nhóm {Obese, Overweight} và nhóm {Normal, Underweight}.
+#H1: Chiều cao trung bình giữa nhóm {Obese, Overweight} thấp hơn nhóm {Normal, Underweight}.
+# Gộp nhóm {Obese, Overweight} và {Normal, Underweight}
+data_female <- subset(data, gender == 'F')
+# Gộp nhóm {Obese, Overweight} và {Normal, Underweight}
+
+data_female$group <- ifelse(data_female$bmi_category %in% c("Obese", "Overweight"), 
+                            "High BMI", "Low BMI")
+
+print(table(data_female$group))
+summary(data_female$height_cm)
+h2f <- aovp(formula = height_cm ~ group, data = data_female, perm = "Prob")
+print(summary(h2f))
+# p-val = 2.2e-16
+# Với mức ý nghĩa alpha =0.05 , p-val < alpha nên ta chấp nhận H1: Chiều cao trung bình giữa nhóm {Obese, Overweight} thấp hơn nhóm {Normal, Underweight}.
+# Vậy kết luận nhận xét ban đầu là chính xác và mang ý nghĩa thống kê
+
+
+
+
+
+
+
+#3.body_fat dựa trên class và gender
+ggplot(data, aes(x = class, y = body_fat, fill = gender)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(title = "Tỷ lệ mỡ cơ thể trung bình theo nhóm hiệu suất và giới tính", 
+       x = "Nhóm hiệu suất", y = "Tỷ lệ mỡ (%)") +
+  theme_minimal()
+##### Nhận xét : % Mỡ (body-fat) thấp nhất ở class A , sau đó tăng dần đều ( ở cả 2 giới ) tới class D là cao nhất . % mỡ ở nam giới
+# có xu hướng thấp hơn nữ giới 
+# Để kiểm tra xem nhận xét mang ý nghĩa thống kê hay chỉ là kết quả của sự ngẫu nhiên , ta thực hiện các kiểm định:
+#H0: Không có sự khác biệt về chiều tỉ lệ mỡ trung bình ở nam giới và nữ giới.
+#H1: Tỉ lệ mỡ trung bình ở nam giới thấp hơn nữ giới.
+diff_h3 <- perm_fun(x = data$body_fat, nA = 4916, nB = 8457, R = 1000)
+h3_mean_a <- mean(data$body_fat[data$gender == "M"])
+h3_mean_b <- mean(data$body_fat[data$gender == "F"])
+mean(diff_h3 < (h3_mean_a - h3_mean_b))
+# P-value = 0 
+# Với mức ý nghĩa alpha = 0.05 , p-value < alpha nên chấp nhận H1 : Tỉ lệ mỡ cơ thể trung bình ở nam giới thấp hơn nữ giới
+# Kế tiếp ta có : 
+#H0: Không có sự khác biệt về tỉ lệ mỡ cơ thể trung bình ở các nhóm hiệu suất.
+#H1: Có ít nhất một nhóm hiệu suất có thỉ lệ mỡ cơ thể trung bình khác các nhóm còn lại.
+h3 <- aovp(formula = body_fat ~ class, data = data, perm = "Prob")
+summary(h3)
+#p-val = 2.2e-16
+# Với mức ý nghĩa alpha = 0.05 , p-value < alpha nên chấp nhận H1: Có ít nhất một nhóm hiệu suất có tỉ lệ mỡ cơ thể trung bình khác các nhóm còn lại.
+# Vậy kết luận nhận xét ban đầu là chính xác và mang ý nghĩa thống kê
+
+
+
+
+
+
+
+
+#4. Vẽ biểu đồ trung bình fitness_score theo class và giới tính
+ggplot(data, aes(x = class, y = fitness_score, fill = gender)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(title = "Điểm sức khỏe trung bình theo nhóm hiệu suất và giới tính", 
+       x = "Nhóm hiệu suất", y = "Điểm sức khỏe") +
+  theme_minimal()
+##### Nhận xét : Chỉ số điểm fitness score tốt nhất ở class A , sau đó giảm dần (ở cả 2 giới).Fitness score ở nam giới cao hơn nữ giới 
+# Để kiểm tra xem nhận xét mang ý nghĩa thống kê hay chỉ là kết quả của sự ngẫu nhiên , ta thực hiện các kiểm định:
+#H0: Không có sự khác biệt về fitness score trung bình ở nam giới và nữ giới.
+#H1: fitness score trung bình ở nữ giới thấp hơn nam giới.
+diff_h4 <- perm_fun(x = data$fitness_score, nA = 4916, nB = 8457, R = 1000)
+h4_mean_a <- mean(data$fitness_score[data$gender == "M"])
+h4_mean_b <- mean(data$fitness_score[data$gender == "F"])
+mean(diff_h4 < (h4_mean_b - h4_mean_a))
+# P-value = 0 
+# Với mức ý nghĩa alpha = 0.05 , p-value < alpha nên chấp nhận H1 : fitness score trung bình ở nữ giới thấp hơn nam giới
+# Kế tiếp ta có : 
+#H0: Không có sự khác biệt về fitness score trung bình ở các nhóm hiệu suất.
+#H1: Có ít nhất một nhóm hiệu suất có fitness score trung bình khác các nhóm còn lại.
+h4 <- aovp(formula = fitness_score ~ class, data = data, perm = "Prob")
+summary(h4)
+#p-val = 2.2e-16
+# Với mức ý nghĩa alpha = 0.05 , p-value < alpha nên chấp nhận H1: Có ít nhất một nhóm hiệu suất có fitness score trung bình khác các nhóm còn lại.
+# Vậy kết luận nhận xét ban đầu là chính xác và mang ý nghĩa thống kê
+
+
+
+
+
+
+
+
+
+#5. Vẽ biểu đồ trung bình pulse_pressure theo class và giới tính
+ggplot(data, aes(x = class, y = pulse_pressure, fill = gender)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(title = "Sự khác biệt chỉ số Pulse_pressure(áp lực mạch đập) trung bình theo nhóm hiệu suất và giới tính", 
+       x = "Nhóm hiệu suất", y = "Pulse pressure (mmHg)") +
+  theme_minimal()
+
+##### Nhận xét : Chỉ số pulse pressure trung bình ở nam giới giảm dần từ class A về class D và cao hơn nữ giới . Trong khi ở nữ giới lại không có xu hướng 
+#tăng giảm rõ ràng với class C thấp nhất , B cao nhất , A và D gần ngang nhau
+# Để kiểm tra nhận xét trên có mang ý nghĩa thống kê không , ta thực hiện các kiểm định:
+#H0 : Không có sự khác biệt về pulse pressure trung bình ở 2 giới tính 
+#H1 : Pulse pressure trung bình ở nữ giới thấp hơn nam giới 
+diff_h5 <- perm_fun(x = data$fitness_score, nA = 4916, nB = 8457, R = 1000)
+h5_mean_a <- mean(data$pulse_pressure[data$gender == "F"])
+h5_mean_b <- mean(data$pulse_pressure[data$gender == "M"])
+mean(diff_h5 < (h5_mean_a - h5_mean_b))
+#p-val = 0 
+#Với mức ý nghĩa alpha =0.05 , p-val < alpha nên chấp nhận H1 
+#Kế tiếp ta có : 
+#H0 : Không có sự khác biệt về pulse pressure trung bình giữa các nhóm hiệu suất của nam giới 
+#H1 : Có ít nhất 1 sự khác biệt về pulse pressure trung bình giữa các nhóm hiệu suất của nam giới
+data_male <- subset(data, gender == "M")
+# Chạy ANOVA
+model_male <- aov(pulse_pressure ~ class, data = data_male)
+summary(model_male)
+#P-val = 2.05e-08
+# Với mức ý nghĩa alpha = 0.05 , p-val < alpha nên chấp nhận H1 
+# Tương tự đối với nhóm nữ : 
+#H0 : Không có sự khác biệt về pulse pressure trung bình giữa các nhóm hiệu suất của nữ giới 
+#H1 : Có ít nhất 1 sự khác biệt về pulse pressure trung bình giữa các nhóm hiệu suất của nữ giới
+data_female <- subset(data, gender == "F")
+# Chạy ANOVA
+model_female <- aov(pulse_pressure ~ class, data = data_female)
+summary(model_female)
+#p-val = 0.107 
+# Với mức ý nghĩa alpha =0.05 , p-val >alpha nên chấp nhận H0 
+# Vậy nhận xét ban đầu chưa chính xác và chỉ mang tính ngẫu nhiên vì thực tế , không có sự khác biệt về pulse pressure trung bình giữa các nhóm hiệu suất của nữ giới 
+
+
+
+
+
+
+#6.
+ggplot(data, aes(x = bmi_category, y = pulse_pressure, fill = gender)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(title = "Pulse pressure (áp lực mạch đập) trung bình theo phân loại BMI và giới tính", 
+       x = "Phân loại BMI", y = "Pulse pressure (mmHg)") +
+  theme_minimal()
+
+##### Nhận xét : Pulse pressure trung bình ở nam giới của 3 nhóm Normal , Obese , Overweight gần như ngang nhau , của Underweight là thấp nhất, cả 4 nhóm đều cao hơn nữ giới
+#Ở nữ giới thì chỉ số lại khá cao trong 2 nhóm Obese và Overweight , nhóm Normal thấp hơn đôi chút và nhóm Underweight là thấp nhất 
+# Để kiểm tra nhận xét trên , ta thực hiện các kiểm định sau :
+# Ta đã kiểm đinh được Pulse pressure ở nữ giới thấp hơn nam giới trong câu trước , nên giờ ta tiếp tục 
+
+# H0 : Không có sự khác biệt pulse pressure trung bình ở các nhóm BMI ở nam giới 
+# H1 : có ít nhất 1 sự khác biệt pulse pressure trung bình ở các nhóm BMI ở nam giới
+data_male <- subset(data, gender == "M")
+model_male <- aov(pulse_pressure ~ bmi_category, data = data_male)
+# Tóm tắt kết quả
+summary(model_male)
+# P-val = 8.96e-05 
+# Với mức ý nghĩa alpha = 0.05 , p-val < alpha nên chấp nhận H1 
+# Kế tiếp :
+# H0 : Không có sự khác biệt pulse pressure trung bình ở các nhóm BMI ở nữ giới 
+# H1 : có ít nhất 1 sự khác biệt pulse pressure trung bình ở các nhóm BMI ở nữ giới
+
+data_female <- subset(data, gender == "F")
+model_female <- aov(pulse_pressure ~ bmi_category, data = data_female)
+summary(model_female)
+#p-val = 2e-16 
+# Với mức ý nghĩa alpha = 0.05 , p-val < alpha nên chấp nhận H1 
+# Vậy nhận xét ban đầu có thể xem là mang ý nghĩa thống kê 
+
+
+
+
+
+############### theo độ tuổi 
+#7. age và pulse_pressure dựa trên class
+ggplot(data, aes(x = age, y = pulse_pressure, color = class)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(title = "Quan hệ giữa Tuổi và Sự khác biệt Pulse pressure theo Class",
+       x = "Tuổi", y = "Pulse pressure (mmHg)") +
+  scale_color_manual(values = c("A" = "blue", "B" = "red", "C" = "green", "D" = "yellow")) +
+  theme_minimal()
+
+##### Nhận xét : dựa vào đường cong thể hiện xu hướng tăng giảm của các chấm dữ liệu , ta thấy chỉ số áp lực mạch đập có xu hướng tăng lên khi tuổi
+#tác càng cao 
+# Để kiểm định nhận xét trên , ta thực hiện : 
+#H0: Không có mối quan hệ tuyến tính giữa tuổi tác và áp lực mạch đập 
+#H1: Có mối quan hệ tuyến tính giữa tuổi tác và áp lực mạch đập 
+# Chạy mô hình hồi quy
+model <- lm(pulse_pressure ~ age, data = data)
+# Xem tóm tắt kết quả
+summary(model)
+# p-val < 2e-16 
+# Với mức ý nghĩa alpha = 0.05 , p-val < alpha nên ta chấp nhận H1 : Có mối quan hệ tuyến tính giữa tuổi tác và áp lực mạch đập , nghĩa là tuổi tác 
+# tăng thì áp lực mạch đập cũng tăng . 
+# ta kết luận nhận xét ban đầu là chính xác và mang ý nghĩa thống kê 
+
+
+
+
+
+
+
+#8. fitness score và age dựa trên class
+ggplot(data, aes(x = age, y = fitness_score, color = class)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(title = "Quan hệ giữa Tuổi và Điểm thể lực theo Class",
+       x = "Tuổi", y = "Điểm thể lực") +
+  scale_color_manual(values = c("A" = "blue", "B" = "red", "C" = "green", "D" = "yellow")) +
+  theme_minimal()
+
+##### Nhận xét : dựa vào các đường cong thể hiện xu hướng tăng giảm của dữ liệu , ta thấy ở cả 4 class thì chỉ số fitness score cao nhất ở giai đoạn
+# khoảng 25 tới 35 tuổi . Từ 40 tuổi trở đi thì chỉ số bắt đầu giảm dần. 
+# Để kiểm định nhận xét trên , ta thực hiện : 
+# Chia ra các nhóm tuổi 
+data$age_group <- cut(data$age, 
+                      breaks = c(0, 25, 35, 40, Inf), 
+                      labels = c("Dưới 25", "25-35", "35-40", "Trên 40"), 
+                      right = FALSE)
+
+#H0 : Không có sự khác biệt về fitness score ở các nhóm tuổi 
+#H1 :  Có sự khác biệt về fitness score ở các nhóm tuổi
+# Tính trung bình fitness_score theo nhóm tuổi
+aggregate(fitness_score ~ age_group, data = data, mean)
+# Kiểm định 
+classes <- unique(data$class) 
+for (class in classes) {
+  cat("\nClass:", class, "\n")
+  data_class <- subset(data, class == class)
+  
+  # Chạy ANOVA
+  model <- aov(fitness_score ~ age_group, data = data_class)
+  
+  # Tóm tắt kết quả
+  print(summary(model))
+}
+# p-val <2e-16
+# Mức ý nghĩa alpha = 0.05
+# Với các p-val lần lượt : 
+# Nhóm A : 2e-16 < alpha
+# Nhóm B : 2e-16 < alpha
+# Nhóm C : 2e-16 < alpha 
+# Nhóm D : 2e-16 < alpha 
+# -> Ta đủ cơ sở chấp nhận H1
+# Vậy kết luận nhận xét ban đầu có thể tạm xem là mang ý nghĩa thống kê 
+
+
+
+
+
+
+#9.Quan hệ grip_force và age dựa trên Class
+ggplot(data, aes(x = age, y = grip_force, color = class)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(title = "Quan hệ giữa Tuổi và Lực kẹp theo Class",
+       x = "Tuổi", y = "Lực kẹp (kg)") +
+  scale_color_manual(values = c("A" = "blue", "B" = "red", "C" = "green", "D" = "yellow")) +
+  theme_minimal()
+# Nhận xét : Lực kẹp ở cả 4 class đạt đỉnh ở giai đoạn 25 tới 40 tuổi , sau 40 thì chỉ số này có xu hướng giảm xuống 
+# Để kiểm tra nhận xét trên có mang tính thống kê hay không , ta có : 
+#H0 : Không có sự khác biệt về lực kẹp ở các nhóm tuổi 
+#H1 :  Có sự khác biệt về lực kẹp ở các nhóm tuổi
+data$age_group <- cut(data$age, 
+                      breaks = c(0, 25, 40, Inf), 
+                      labels = c("Dưới 25", "25-40", "Trên 40"), 
+                      right = FALSE)
+
+# Tính trung bình lực kẹp (gripForce) theo nhóm tuổi và class
+aggregate(grip_force ~ age_group + class, data = data, mean)
+
+classes <- unique(data$class)
+
+for (class in classes) {
+  cat("\nClass:", class, "\n")
+  data_class <- subset(data, class == class)
+  
+  # Chạy ANOVA
+  model <- aov(grip_force ~ age_group, data = data_class)
+  
+  # Tóm tắt kết quả
+  print(summary(model))
+}
+# Mức ý nghĩa alpha = 0.05
+# Với các p-val lần lượt : 
+# Nhóm A : 2e-16 < alpha
+# Nhóm B : 2e-16 < alpha
+# Nhóm C : 2e-16 < alpha 
+# Nhóm D : 2e-16 < alpha 
+# -> Ta đủ cơ sở chấp nhận H1
+# Vậy nhận xét ban đầu có thể tạm xem là mang ý nghĩa thống kê 
+
+
+
+
+#10.Quan hệ giữa age và grip_force dựa trên class và gender
+ggplot(data, aes(x = age, y = grip_force, color = gender)) +
+  geom_point(alpha = 0.7, size = 3) + # Điểm dữ liệu
+  geom_smooth(method = "loess", se = TRUE) + # Đường xu hướng
+  facet_wrap(~ class) + # Tách biểu đồ theo giới tính
+  labs(
+    title = "Quan hệ giữa Tuổi và Lực kẹp theo Class và Gender",
+    x = "Tuổi",
+    y = "Lực kẹp (kg)"
+  ) +
+  theme_minimal()
+##### Nhận xét : Chỉ số lực kẹp ở nam giới nhìn chung tốt hơn nữ giới ở cả 4 class . Tuy nhiên khi tuổi càng cao 
+# thì lực kẹp ở nam giới có xu hướng giảm nhưng ở nữ giới lại không thể hiện xu hướng tăng giảm rõ ràng 
+# Để kiểm tra nhận xét trên có mang ý nghĩa thống kê không , ta thực hiện : 
+# - Dựa vào kết quả kiểm định của plot 9 , ta đã có thể khẳng định chỉ số lực kẹp của nam tốt hơn nữ ở cả 4 class 
+# và đồng thời đạt đỉnh ở độ tuổi 25-40 , sau đó thì đi xuống .Tuy nhiên để kiểm tra xu hướng lực kẹp theo tuổi tác ở riêng nữ giới thì ta có :
+# H0 : Không có sự khác biệt về lực kẹp nữ giới ở các nhóm tuổi 
+# H1 : Có ít nhất 1 sự khác biệt về lực kẹp nữ giới ở các nhóm tuổi 
+data_female <- subset(data, gender == "F")
+
+# Phân nhóm tuổi (nếu chưa có cột age_group)
+data_female$age_group <- cut(data_female$age, 
+                             breaks = c(0, 25, 40, Inf), 
+                             labels = c("Dưới 25", "25-40", "Trên 40"), 
+                             right = FALSE)
+
+# Tính trung bình lực kẹp (grip_force) theo nhóm tuổi và class
+aggregate(grip_force ~ age_group + class, data = data_female, mean)
+
+# Lặp qua từng class để chạy ANOVA
+classes <- unique(data_female$class)
+
+for (class in classes) {
+  cat("\nClass:", class, "\n")
+  data_class <- subset(data_female, class == class)
+  
+  model <- aov(grip_force ~ age_group, data = data_class)
+  print(summary(model))
+}
+# Mức ý nghĩa alpha = 0.05
+# Với các p-val lần lượt : 
+# Nhóm A : 2e-16 < alpha
+# Nhóm B : 2e-16 < alpha
+# Nhóm C : 2e-16 < alpha 
+# Nhóm D : 2e-16 < alpha 
+# -> Ta đủ cơ sở chấp nhận H1
+# Vậy nhận xét ban đầu có thể tạm xem là mang ý nghĩa thống kê 
+
+
+
+
+#11.Quan hệ giữa tuổi và BMI dựa trên giới tính
+ggplot(data, aes(x = age, y = bmi, color = gender)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(
+    title = "Quan hệ giữa Tuổi và BMI theo Giới tính",
+    x = "Tuổi",
+    y = "BMI"
+  ) + scale_color_manual(values = c("F" = "blue", "M" = "red")) +
+  theme_minimal()
+##### Nhận xét : Chỉ số BMI của nam giới ở mức cao trong độ tuổi từ 25 tới 40 . Sau 40 thì chỉ số bắt đầu giảm xuống
+# Tuy nhiên ở nữ giới thì chỉ số bmi lại thấp ở độ tuổi 20 tới trước 40 , nhưng ngoài 40 thì lại có xu hướng tăng lên 
+# , điều này khá lạ , nguyên nhân có thể do cột Female bị thiếu dữ liệu . 
+# Biểu đồ và nhận xét trên chỉ mang tính tham khảo chứ chưa mang ý nghĩa thống kê 
+
+#12.Quan hệ giữa Tuổi và Phần trăm Mỡ Cơ thể theo class
+ggplot(data, aes(x = age, y = body_fat, color = gender)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  facet_wrap(~ class) +
+  labs(title = "Quan hệ giữa Tuổi và Body Fat theo Class",
+       x = "Tuổi", y = "Body Fat (%)") +
+  scale_color_manual(values = c("F" = "blue", "M" = "red")) +
+  theme_classic()
+##### Nhận xét : % Mỡ(body_fat) ở cả 2 giới đều có xu hướng đi lên khi ở độ tuổi ngoài 40 , ở nữ giới thể hiện xu hướng này rõ hơn
+# Để kiểm tra nhận xét trên , ta có : 
+#H0 : % mỡ không có sự khác biệt trên cả 2 giới ở mọi độ tuổi 
+#H1 : % mỡ có sự khác biệt từ độ tuổi 40 trở đi trên cả 2 giới 
+data$age_group <- cut(data$age, 
+                      breaks = c(0, 40, Inf), 
+                      labels = c("Dưới 40", "Trên 40"), 
+                      right = FALSE)
+
+# Tính trung bình % mỡ cơ thể theo giới tính và nhóm tuổi
+aggregate(body_fat ~ age_group + gender, data = data, mean)
+data_male <- subset(data, gender == "M")
+data_female <- subset(data, gender == "F")
+
+# Kiểm định t cho nam giới
+t_test_male <- t.test(body_fat ~ age_group, data = data_male)
+cat("Kết quả kiểm định t cho nam giới:\n")
+print(t_test_male)
+
+# Kiểm định t cho nữ giới
+t_test_female <- t.test(body_fat ~ age_group, data = data_female)
+cat("Kết quả kiểm định t cho nữ giới:\n")
+print(t_test_female)
+# cho alpha =0.05 
+# Cả 2 p-val đều = 2.2e-16 < alpha nên ta chấp nhận H1 
+# Vậy nhận xét ban đầu có mang ý nghĩa thống kê 
+
+
+
+
+
+
+#14. Quan hệ giữa Systolic và Diastolic theo giới tính
+ggplot(data, aes(x = systolic, y = diastolic, color = gender)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Quan hệ giữa Huyết áp Tâm thu và Tâm trương",
+       x = "Huyết áp Tâm thu (mmHg)", y = "Huyết áp Tâm trương (mmHg)") +
+  theme_light()
+##### Nhận xét : Ở cả 2 giới thì huyết áp tâm thu và huyết áp tâm trương đều có xu hướng tỉ lệ thuận , đồng thời 2 chỉ số này ở nam cao hơn nữ 
+
+# Tách thành 2 biểu đồ nhỏ
+# 14.1 Biểu đồ violin thể hiện phân phối huyết áp tâm thu giữa nam và nữ.
+ggplot(data, aes(x = gender, y = systolic, fill = gender)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Gender", y = "Systolic(mmHg)") +
+  ggtitle("Phân phối huyết áp tâm thu giữa nam và nữ.") +
+  theme_bw()
+# Qua biểu đồ ta thấy rõ được huyết áp tâm thu của nữ giới thấp hơn nam giới.
+# Ta sẽ kiểm định "Huyết áp tâm thu của nữ giới thấp hơn nam giới hay không?"
+# H0: Có sự giống nhau về huyết áp tâm thu giữa nam và nữ.
+# H1: Huyết áp tâm thu của nữ thấp hơn nam.
+
+diff <- perm_fun(x = data$systolic, nA = 4916, nB = 8457, R = 1000)
+mean_a <- mean(data$systolic[data$gender == "F"])
+mean_b <- mean(data$systolic[data$gender == "M"])
+mean(diff < (mean_a - mean_b))
+# p-value = 0 < 0.05 -> Chấp nhận H1: Huyết áp tâm thu của nữ thấp hơn nam.
+
+# 14.2 Biểu đồ violin thể hiện phân phối huyết áp tâm trương giữa nam và nữ.
+ggplot(data, aes(x = gender, y = diastolic, fill = gender)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Gender", y = "Diastolic(mmHg)") +
+  ggtitle("Phân phối huyết áp tâm trương giữa nam và nữ.") +
+  theme_bw()
+# Qua biểu đồ ta thấy có vẻ huyết áp tâm trương của nữ giới thấp hơn nam giới.
+# Ta sẽ kiểm định "Huyết áp tâm trương của nữ giới thấp hơn nam giới hay không?"
+# H0: Có sự giống nhau về huyết áp tâm trương giữa nam và nữ.
+# H1: Huyết áp tâm trương của nữ thấp hơn nam.
+
+diff <- perm_fun(x = data$diastolic, nA = 4916, nB = 8457, R = 1000)
+mean_a <- mean(data$diastolic[data$gender == "F"])
+mean_b <- mean(data$diastolic[data$gender == "M"])
+mean(diff < (mean_a - mean_b))
+# p-value = 0 < 0.05 -> Chấp nhận H1: Huyết áp tâm trương của nữ thấp hơn nam.
+
+#H0 :  Không có mối quan hệ tuyến tính giữa huyết áp tâm thu và huyết áp tâm trương
+#H1 :  có mối quan hệ tuyến tính giữa huyết áp tâm thu và huyết áp tâm trương
+cor.test(data$systolic, data$diastolic)
+# Phân tích cho nam
+male_data <- filter(data, gender == "M")
+cor.test(male_data$systolic, male_data$diastolic)
+
+# Phân tích cho nữ
+female_data <- filter(data, gender == "F")
+cor.test(female_data$systolic, female_data$diastolic)
+# Cả 2 p-val = 2.2e-16 < alpha nên ta chấp nhận H1 
+# Vậy kết luận ban đầu mang ý nghĩa thống kê 
+
+
+#15. Quan hệ giữa Cân nặng và áp lực mạch đập theo bmi_category 
+ggplot(data, aes(x = weight_kg, y = pulse_pressure, color = bmi_category)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(title = "Quan hệ giữa Cân nặng và Áp lực mạch đập(Pulse pressure) theo BMI",
+       x = "Cân nặng (kg)", y = "Áp lực mạch đập (mmHg)") 
+
+##### Nhận xét : Ở cả 4 phân nhóm BMI đều không thể hiện xu hướng rõ ràng cho mối quan hệ giữa cân nặng và áp lực mạch đập . Ta không dám chắc 
+# nếu cân năng tặng thì áp lực mạch đập sẽ tăng hoặc ngược lại 
+
+
+# 15'. Biểu đồ violin thể hiện phân phối áp lực mạch đập theo bmi_category
+ggplot(data, aes(x = bmi_category, y = pulse_pressure, fill = bmi_category)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "bmi_category", y = "pulse_pressure (mmHg)") +
+  ggtitle("Phân phối áp lực mạch đập giữa các nhóm bmi.") +
+  theme_bw()
+# Qua biểu đồ ta thấy được sự khác biệt về áp lực mạch đập giữa các nhóm bmi
+# Ta sẽ kiểm định "Áp lực mạch đập giữa các nhóm bmi có sự khác biệt hay không?"
+# H0: Không có sự khác biệt về áp lực mạch đập giữa các nhóm bmi.
+# H1: Có sự khác biệt về áp lực mạch đập giữa các nhóm bmi.
+
+h <- aovp(formula = pulse_pressure ~ bmi_category, data = data, perm = "Prob")
+summary(h)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: Có sự khác biệt về áp lực mạch đập giữa các nhóm bmi.
+
+# Biểu đồ tương quan 
+corr_matrix <- cor(data[, c("age", "height_cm", "weight_kg","body_fat","diastolic","systolic", 
+                            "grip_force","sit_and_bend_forward_cm","sit_ups_counts", "broad_jump_cm", "bmi",
+                            "fitness_score","pulse_pressure")], use = "complete.obs")
+corrplot(corr_matrix, method = "circle", tl.cex = 0.8)
+
+
+# 16.So sánh cân nặng và chiều cao theo giới tính 
+ggplot(data, aes(x = weight_kg, y = height_cm, color = gender)) +
+  geom_point(alpha = 0.7, size = 3) +
+  geom_smooth(method = "loess", se = TRUE) +
+  labs(
+    title = "Quan hệ giữa cân nặng và chiều cao theo Giới tính",
+    x = "weight(kg)",
+    y = "height(cm)"
+  ) + scale_color_manual(values = c("F" = "blue", "M" = "red")) +
+  theme_minimal()
+
+##### Nhận xét : Nhìn chung chỉ số cân nặng và chiều cao ở nam giới cao hơn nữ giới . Đường cong thể hiện xu hướng ở nữ giới 
+# có dạng gần giống parabol , cho thấy chiều cao tăng lên theo cân nặng lúc ban đầu, sau đó dường như đạt đỉnh nhưng bắt đầu giảm ở các mức cân nặng cao hơn
+#, ở nam giới đường cong có xu hướng tăng lên từ từ, cho thấy chiều cao tăng theo cân nặng và có vẻ tiếp tục tăng lên ở mức cân nặng lớn hơn
+
+# Xem xét cân nặng giữa nam và nữ
+# 16'. Biểu đồ violin thể hiện phân phối cân nặng giữa nam và nữ 
+ggplot(data, aes(x = gender, y = weight_kg, fill = gender)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Gender", y = "Cân nặng (kg)") +
+  ggtitle("Phân phối cân nặng giữa nam và nữ.") +
+  theme_bw()
+# Qua biểu đồ ta thấy được cân nặng của nữ giới nhẹ hơn nam giới.
+# Ta sẽ kiểm dịnh "Nữ giới có cân nặng nhẹ hơn nam giới"
+# H0: cân nặng giữa nam và nữ bằng nhau.
+# H1: Cân nặng của nữ thấp hơn nam.
+diff <- perm_fun(x = data$weight_kg, nA = 4916, nB = 8457, R = 1000)
+mean_a <- mean(data$weight_kg[data$gender == "F"])
+mean_b <- mean(data$weight_kg[data$gender == "M"])
+mean(diff < (mean_a - mean_b))
+# p-value = 0 < 0.05 -> Chấp nhận H1: Cân nặng của nữ thấp hơn nam.
+# Tuy nhiên chưa tìm được cách kiểm định đường cong parabol có mang ý nghĩa thống kê không ? 
+# Nên nhận xét ban đầu chỉ mang tính tham khảo chứ chưa có ý nghĩa thống kê
+#17.Box so sánh sit_and_bend_forward_cm theo các nhóm bmi
+ggplot(data, aes(x = bmi_category, y = sit_and_bend_forward_cm, fill = bmi_category)) +
+  geom_boxplot() +
+  theme_minimal() +
+  labs(
+    title = "So sánh sit_and_bend_forward_cm theo nhóm BMI",
+    x = "Nhóm BMI",
+    y = "sit_and_bend_forward_cm (cm)"
+  )
+
+##### Nhận xét : Chỉ số sit_and_bend_forward_cm trung bình thấp nhất ở 2 nhóm Obese và Overweight . Nhóm Normal cao hơn và nhóm Underweight 
+#là cao nhất  
+
+# Ta sẽ kiểm định "lực kẹp giữa các nhóm bmi có giống nhau không?"
+# H0: sit_and_bend_forward_cm giữa các nhóm bmi không khác nhau.
+# H1: sit_and_bend_forward_cm giữa các nhóm bmi khác nhau.
+
+h <- aovp(formula = grip_force ~ bmi_category, data = data, perm = "Prob")
+summary(h)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: sit_and_bend_forward_cm giữa các nhóm bmi khác nhau.
+
+########### theo các class (biểu đồ tổng hợp )
+# Normalization (min-max scaling) cho tất cả các cột
+data_scaled <- data %>%
+  mutate(across(c(bmi, body_fat, fitness_score, pulse_pressure), 
+                ~ scales::rescale(.), 
+                .names = "{col}_scaled"))
+
+# Vẽ biểu đồ tổng hợp
+data_long_scaled <- data_scaled %>%
+  gather(key = "variable", value = "value", bmi_scaled, body_fat_scaled, fitness_score_scaled, pulse_pressure_scaled)
+
+ggplot(data_long_scaled, aes(x = class, y = value, fill = variable)) +
+  geom_bar(stat = "summary", fun = "mean", position = "dodge") +
+  labs(title = "Biểu đồ tổng hợp các chỉ số sau khi scale theo Class", 
+       x = "Nhóm Phân loại", 
+       y = "Giá trị trung bình (đã chuẩn hóa)") +
+  theme_minimal() +
+  scale_fill_manual(values = c("bmi_scaled" = "blue", "body_fat_scaled" = "red", 
+                               
+                               "fitness_score_scaled" = "darkgreen", "pulse_pressure_scaled" = "orange"))
+
+##### Nhận xét : 
+#-Chỉ số BMI ở class A thấp nhất , tuy nhiên ở class B lại cao hơn class C , class D cao nhất 
+#-Fitness score giảm dần đều theo từ class A sang D 
+#-Body fat tăng dần đều từ class A sang D 
+#-Pulse pressure (áp lực mạch đập) gần như ngang nhau ở cả 4 class 
+
+
+
+
+
+
+
+
+## 18. “Chỉ số nhảy xa của nữ yếu hơn nam hay không?”
+# H0: Chỉ số nhảy xa giữa nam và nữ bằng nhau.
+# H1: Chỉ số nhảy xa của nữ yếu hơn nam.
+
+# Biểu đồ violin
+ggplot(data, aes(x = gender, y = broad_jump_cm, fill = gender)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Gender", y = "Broad Jump(cm)") +
+  ggtitle("Phân phối chỉ số nhảy xa giữa nam và nữ.") +
+  theme_bw()
+# Qua biểu đồ, ta thấy sự khác biệt về chỉ số nhảy xa giữa nam và nữ
+
+diff_h6 <- perm_fun(x = data$broad_jump_cm, nA = 4916, nB = 8457, R = 1000)
+h6_mean_a <- mean(data$broad_jump_cm[data$gender == "F"])
+h6_mean_b <- mean(data$broad_jump_cm[data$gender == "M"])
+mean(diff_h6 < (h6_mean_a - h6_mean_b))
+# p-value = 0 < 0.05 -> Chấp nhận H1: Chỉ số nhảy xa của nữ yếu hơn nam.
+
+## 19. "Nhóm huyết áp phụ thuộc vào nhóm bmi hay không?"
+# H0: Nhóm huyết áp không phụ thuộc vào nhóm bmi. (2 nhóm độc lập nhau)
+# H1: Nhóm huyết áp phụ thuộc vào nhóm bmi.
+pivot_blood_pressure_bmi <- data %>% 
+  count(blood_pressure_category, bmi_category) %>% 
+  spread(key = bmi_category, value = n, fill = 0)
+
+# Chuyển đổi bảng pivot thành ma trận
+pivot_matrix <- as.matrix(pivot_blood_pressure_bmi[, -1])
+rownames(pivot_matrix) <- pivot_blood_pressure_bmi$blood_pressure_category
+pivot_matrix
+
+chisq.test(pivot_matrix)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: Nhóm huyết áp phụ thuộc vào nhóm BMI.
+
+
+
+
+## 20. "Có hay không sự khác biệt về Chỉ số nhảy bật xa giữa các nhóm bmi."
+# H0: Không có sự khác biệt về chỉ số nhảy bật xa giữa các nhóm bmi.
+# H1: Có sự khác biệt về chỉ số nhảy bật xa giữa các nhóm bmi.
+# Vẽ biểu đồ violin
+ggplot(data, aes(x = bmi_category, y = broad_jump_cm, fill = bmi_category)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "bmi_category", y = "Broad Jump") +
+  ggtitle("Phân phối chỉ số nhảy xa giữa các nhóm bmi.") +
+  theme_bw()
+# Qua biểu đồ ta thấy có sự khác biệt về chỉ số nhảy bật xa giữa các nhóm bmi.
+
+h_13 <- aovp(formula = broad_jump_cm ~ bmi_category, data = data, perm = "Prob")
+summary(h_13)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: Có sự khác biệt về Chỉ số nhảy bật xa giữa các nhóm bmi
+
+
+
+## 21. "Ở các nhóm chỉ số huyết áp thì độ tuổi có sự khác biệt hay không?"
+# H0: Ở các nhóm chỉ số huyết áp thì độ tuổi không khác biệt
+# H1: Ở các nhóm chỉ số huyết áp thì độ tuổi có sự khác biệt
+# Vẽ biểu đồ violin
+ggplot(data, aes(x = blood_pressure_category, y = age, fill = blood_pressure_category)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Blood Pressure Category", y = "Age") +
+  ggtitle("Phân phối độ tuổi giữa các nhóm chỉ số huyết áp.") +
+  theme_bw()
+# Qua biểu đồ ta thấy rõ được sự khác biệt về độ tuổi ở các nhóm chỉ số huyết áp
+
+h_14 <- aovp(formula = age ~ blood_pressure_category, data = data, perm = "Prob")
+summary(h_14)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: Độ tuổi ở các nhóm chỉ số huyết áp có khác biệt.
+
+
+
+## 22. "Ở các nhóm chỉ số huyết áp thì cân nặng có sự khác biệt hay không?"
+# H0: Cân nặng ở các nhóm chỉ số huyết áp không khác biệt.
+# H1: Cân nặng ở các nhóm chỉ số huyết áp có khác biệt.
+# Vẽ biểu đồ violin
+ggplot(data, aes(x = blood_pressure_category, y = weight_kg, fill = blood_pressure_category)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Blood Pressure Category", y = "Weight") +
+  ggtitle("Phân phối cân nặng giữa các nhóm chỉ số huyết áp.") +
+  theme_bw()
+# Qua biểu đồ ta thấy rõ được sự khác biệt về cân nặng ở các nhóm chỉ số huyết áp
+
+h_15 <- aovp(formula = weight_kg ~ blood_pressure_category, data = data, perm = "Prob")
+summary(h_15)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: Cân nặng ở các nhóm chỉ số huyết áp có khác biệt.
+
+
+
+## 23. "Ở các nhóm chỉ số huyết áp thì sit_and_bend_forward_cm có sự khác biệt hay không?"
+# H0: sit_and_bend_forward_cm ở các nhóm chỉ số huyết áp không khác biệt.
+# H1: sit_and_bend_forward_cm ở các nhóm chỉ số huyết áp có khác biệt.
+# Vẽ biểu đồ violin
+ggplot(data, aes(x = blood_pressure_category, y = weight_kg, fill = blood_pressure_category)) +
+  geom_violin() +
+  geom_boxplot(width = 0.15) +
+  labs(x = "Blood Pressure Category", y = "sit_and_bend_forward_cm") +
+  ggtitle("Phân phối cân nặng giữa các nhóm chỉ số huyết áp.") +
+  theme_bw()
+# Qua biểu đồ ta thấy rõ được sự khác biệt về cân nặng ở các nhóm chỉ số huyết áp
+
+h_15 <- aovp(formula = sit_and_bend_forward_cm ~ blood_pressure_category, data = data, perm = "Prob")
+summary(h_15)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: Cân nặng ở các nhóm chỉ số huyết áp có khác biệt.
+
+
+
+
+## 24. "Phân lớp hiệu suất phụ thuộc vào giới tính hay không?"
+# H0: Phân lớp hiệu suất không phụ thuộc vào giới tính (2 nhóm độc lập nhau)
+# H1: Phân lớp hiệu suất phụ thuộc vào giới tính
+pivot_class_gender <- data %>%
+  count(class, gender) %>%
+  spread(key = gender, value = n, fill = 0)
+
+# Chuyển đổi bảng pivot thành ma trận
+pivot_matrix <- as.matrix(pivot_class_gender[, -1])
+rownames(pivot_matrix) <- pivot_class_gender$class
+pivot_matrix
+
+chisq.test(pivot_matrix)
+# p-value < 2.2e-16 < 0.05 -> Chấp nhận H1: Phân lớp hiệu suất phụ thuộc vào giới tính
+
+
+#### Tổng kết phần 1 : 
+#### Các biểu đồ và kết quả của những kiểm định phía trên thể hiện những góc nhìn ở nhiều khía cạnh khác nhau trong dữ liệu 
+# . Điều này có thể góp ích ít nhiều trong việc là những lời khuyên hữu ích cho các chuyên gia sức khỏe .
+
+
+
+######### PHẦN 2 : BOOTSTRAP
+
+# Function to calculate the mean for bootstrap
+# Function to calculate the mean for bootstrap
+boot_mu_fun <- function(data, ind) {
+  data_new <- data[ind]
+  out <- mean(data_new)
+  return(out)
+}
+
+# Sử dụng dữ liệu đã có
+data_boot <- data  
+
+# Các biến cần phân tích
+variables <- c("age", "height_cm", "weight_kg","body_fat","diastolic","systolic", 
+               "grip_force","sit_and_bend_forward_cm","sit_ups_counts", "broad_jump_cm", "bmi",
+               "fitness_score","pulse_pressure")
+
+# Khởi tạo bảng kết quả
+results <- data.frame(
+  Variable = character(0),
+  Mean = numeric(0),
+  Bias = numeric(0),
+  StdError = numeric(0)
+)
+
+# Khởi tạo danh sách để lưu đồ thị
+plot_list <- list()
+
+for (var in variables) {
+  # Thực hiện bootstrap
+  out <- boot(data = data_boot[[var]], statistic = boot_mu_fun, R = 1000)
+  
+  # Trích xuất kết quả
+  mean_val <- out$t0
+  bias_val <- mean(out$t) - out$t0
+  std_error <- sd(out$t)
+  
+  # Thêm kết quả vào bảng
+  results <- rbind(results, data.frame(
+    Variable = var,
+    Mean = mean_val,
+    Bias = bias_val,
+    StdError = std_error
+  ))
+  
+  # Tạo biểu đồ histogram
+  plot_list[[var]] <- ggplot(data = data.frame(t = out$t), mapping = aes(x = t)) +
+    geom_histogram(fill = "gray80", color = "black", bins = 20) +
+    geom_vline(xintercept = out$t0, color = "blue", linetype = "dashed") +
+    xlab(paste("Bootstrap mean of", var)) +
+    ylab("Frequency") +
+    theme_bw()
+}
+
+# In bảng kết quả
+print(results)
+
+# Kết hợp các biểu đồ thành lưới
+grid.arrange(
+  grobs = plot_list,
+  ncol = 4,
+  top = "Bootstrap Results for Selected Variables"
+)
+
+glimpse(data_boot)
+
+
+
+
+
+##################### Bỏ cột age_group
+library(dplyr)
+
+# Loại bỏ cột age_group
+data <- data[, !(colnames(data) == "age_group")]
+##################### Phân loại 
+glimpse(data)
+
+
+
+# Load các thư viện cần thiết
+library(klaR)
+library(MASS)
+library(nnet)
+library(caret)
+library(corrplot)
+library(randomForest)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(xgboost)
+library(Matrix)
+# Lọc bỏ các cột không cần thiết
+data <- data[, !names(data) %in% c("bmi_category")]
+# Bỏ cột bmi_catgory vì cột trên được tạo từ cột bmi, nếu để có thể gây ra hiện tưởng đa cộng tuyến, làm giảm sự chính xác cho mô hình
+
+# Kiểm tra lại dữ liệu sau khi lọc
+glimpse(data)
+
+
+
+# hàm để đánh giá và nhận xét mô hình 
+eval_multi_class <- function(x) {
+  cc <- sum(diag(x))  # Tổng các giá trị trên đường chéo chính (True Positives)
+  sc <- sum(x)        # Tổng tất cả các giá trị trong ma trận nhầm lẫn
+  pp <- colSums(x)    # Tổng giá trị theo cột (số mẫu trong mỗi lớp dự đoán)
+  tt <- rowSums(x)    # Tổng giá trị theo hàng (số mẫu trong mỗi lớp thực tế)
+  
+  # Precision, Recall cho mỗi lớp
+  prec <- diag(x) / colSums(x)    # Precision = TP / (TP + FP)
+  recall <- diag(x) / rowSums(x)  # Recall = TP / (TP + FN)
+  
+  # Tính Macro Precision, Macro Recall, và Macro F1
+  macro_prec <- mean(prec, na.rm = TRUE)  # Trung bình Precision của tất cả các lớp
+  macro_recall <- mean(recall, na.rm = TRUE)  # Trung bình Recall của tất cả các lớp
+  macro_f1 <- 2 * macro_prec * macro_recall / (macro_prec + macro_recall)  # Tính Macro F1
+  
+  # Accuracy và Kappa
+  acc <- cc / sc  # Accuracy = (TP + TN) / (Tổng số mẫu)
+  
+  # Tính chỉ số Kappa
+  kap <- (cc * sc - sum(pp * tt)) / (sc^2 - sum(pp * tt))
+  
+  # Trả về kết quả
+  return(list(Precision = prec, Recall = recall, Accuracy = acc, Kappa = kap, Macro_F1 = macro_f1))
+}
+
+####### K-fold
+# Cài đặt số lần gấp (folds) = 5 cho cross-validation
+train_control <- trainControl(
+  method = "cv", 
+  number = 5,  # 5 folds
+  summaryFunction = defaultSummary,  
+  returnResamp = "all",      
+  savePredictions = "all"
+)
+
+
+######### NaiveBayes
+
+
+# Tính ma trận tương quan vì trước khi sử dụng mô hình NaiveByes phải kiểm tra sự tương quan giữa các biến
+numeric_data <- data[sapply(data, is.numeric)]
+correlation_matrix <- cor(numeric_data)
+
+# Vẽ biểu đồ nhiệt độ để trực quan hóa ma trận tương quan
+corrplot(corr_matrix, method = "circle", tl.cex = 0.8, tl.pos = "n")
+# nhận xét có một số biến có sự tương quan cao -> nên mô hình naiveBayes có thể hoạt động không hiệu quả.
+
+set.seed(123)  # Đảm bảo tính tái lập
+nb_model <- NaiveBayes(class ~ ., data = data)
+nb_pred <- predict(nb_model, newdata = data)
+
+################ in ra kết quả
+# Kết hợp lớp và xác suất của tất cả các lớp vào một bảng
+result <- data.frame(nb_pred$posterior)
+# Thêm cột cho lớp có xác suất cao nhất
+result$Max_Probability <- apply(result, 1, max)
+result$Predicted_Class <- apply(result, 1, function(x) names(result)[which.max(x)])
+# Thêm cột giá trị thực tế
+result$True_Class <- data$class
+
+# Hiển thị kết quả
+head(result)
+# Đánh giá mô hình
+conf_matrix<-table( data$class,nb_pred$class)
+eval_multi_class(conf_matrix)
+
+
+
+# Nhận xét mô hình 
+#Mô hình có độ chính xác là 53.33%. Đây là một mức độ chính xác tương đối thấp, vì trong correlation matrix ta thấy được một số biến có tương quan cao với nhau nên mô hình yếu
+#Kappa : 0.377 cho thấy rằng mức độ tương đồng của mô hình và thực tế là khá yếu 
+#Mô hình có Precision cao nhất ở lớp D tiếp theo là lớp A, trong khi Precision của lớp B và C còn khá thấp, điều này có thể chỉ ra rằng mô hình gặp khó khăn trong việc phân loại chính xác các đối tượng thuộc lớp B và C.
+#Mô hình có Recall cao nhất ở lớp A và D, nhưng lớp B và C bị bỏ sót khá nhiều đối tượng, điều này có thể cho thấy mô hình chưa đủ nhạy để nhận diện đầy đủ các đối tượng của các lớp này
+#0.5258, điều này có nghĩa là mô hình có hiệu suất trung bình khi đánh giá tất cả các lớp, và có sự cân bằng giữa Precision và Recall, tuy nhiên vẫn khá thấp.
+
+# Áp dụng K-fold để kiểm tra thêm lần nữa
+nb_model <- train(class ~ ., data = data, method = "naive_bayes", # sử dụng "naive_bayes" trong caret
+                  trControl = train_control)
+print(nb_model)
+print(nb_model$resample)  # In ra thông tin chi tiết của từng fold
+
+# Nhận xét tổng quan về các fold
+# Accuracy khá thấp , chỉ trong khoảng từ 38% đến 50% -> mô hình dự đoán kém
+# kappa rất thấp, chỉ tầm 19% nếu không dùng kernel đến 32% nếu có dùng kernel và nên sử dụng kernel thì mô hình có vẻ tốt hơn nhưng 31% vẫn là khá thấp nên mức độ tương đồng thực tế thấp
+
+##############************
+# Loại bỏ các cột có tương quan cao hơn ngưỡng
+threshold <- 0.7  # Đặt ngưỡng tương quan
+high_corr_columns <- findCorrelation(correlation_matrix, cutoff = threshold, names = TRUE)
+filtered_data <- numeric_data[, !(names(numeric_data) %in% high_corr_columns)]
+
+# Kiểm tra dữ liệu sau khi lọc
+print("Các cột giữ lại sau khi loại bỏ tương quan cao:")
+print(names(filtered_data))
+
+# Thêm cột 'class' vào lại để áp dụng mô hình
+filtered_data$class <- data$class
+# Áp dụng mô hình Naive Bayes
+set.seed(123)
+nb_model <- NaiveBayes(class ~ ., data = filtered_data)
+nb_pred <- predict(nb_model, newdata = filtered_data)
+
+# Đánh giá kết quả
+conf_matrix <- table(filtered_data$class, nb_pred$class)
+eval_multi_class(conf_matrix)
+
+# mô hình được cải thiện rõ rệt Accuracy 55%, kappa 40%, F1 54% nhưng vẫn chưa phải là tốt
+
+# dùng k-fold để đánh giá
+nb_model <- train(class ~ ., data = filtered_data, method = "naive_bayes", # sử dụng "naive_bayes" trong caret
+                  trControl = train_control)
+print(nb_model)
+print(nb_model$resample)  # In ra thông tin chi tiết của từng fold
+
+### nhận xét: mô hình đã được cãi tiến, các hệ số đều cao hơn 57% Accuracy nếu có dùng kernel và 55% nếu không dùng kernel
+# 40% nếu không dùng kernel và 43% nếu dùng kernel cho chỉ số Kappa 
+## --> mô hình đã được cải tiến nhưng chưa tốt
+######################******************
+
+############ LDA
+
+lda_model <- lda(class ~ ., data = data)
+lda_model
+# Dự đoán trên toàn bộ dữ liệu
+lda_pred <- predict(lda_model, newdata = data)
+# 
+conf_matrix_lda <- table(data$class, lda_pred$class)
+# Đánh giá mô hình
+eval_multi_class(conf_matrix_lda)
+# nhận thấy lda tốt hơn naiveBayes vì nó giả sử các feature có cùng phương sai và dùng phân phối chuẩn để tính  ước lượng hàm mật độ xác suất đồng thời fj(x) --> ít bị ảnh hưởng bởi vấn đề độc lập tuyến tính hơn so với Naive Bayes
+# Accuracy 62% cho thấy mô hình dự đoán độ chính xác trung bình
+# Kappa: 48% cho thấy sự tương đồng trung bình
+# F1 62% : tốt hơn Naive Bayes nhưng vẫn chưa thực sự hiệu quả
+
+# dùng k-fold để đánh giá
+set.seed(123)
+lda_model <- train(class ~ ., data = data, 
+                   method = "lda",  # Sử dụng method "lda"  trong caret
+                   trControl = train_control)
+
+# In kết quả
+print(lda_model)
+print(lda_model$resample)  # In ra thông tin chi tiết của từng fold
+
+##### multinominal logistic
+# Xây dựng mô hình Multinomial Logistic Regression
+logistic_model <- multinom(class ~ ., data = data)
+summary(logistic_model)
+# Dự đoán trên toàn bộ dữ liệu
+logistic_pred <- predict(logistic_model, newdata = data, type = "class")
+
+# Ma trận nhầm lẫn
+conf_matrix_logistic <- table(data$class, logistic_pred)
+eval_multi_class(conf_matrix_logistic)
+
+# K fold
+logistic_model <- train(class ~ ., data = data, 
+                        method = "multinom",  # Sử dụng method "multinom" cho Multinomial Logistic trong caret
+                        trControl = train_control)
+
+# In kết quả
+print(logistic_model)
+print(logistic_model$resample)  # In ra thông tin chi tiết của từng fold
+# nhận xét : 
+#Accuracy   Kappa    
+# 0.6140564  0.4854008 giống như trên
+# các fold có Accuracy và kappa không quá chênh lệch nhau
+
+###### sau khi train và sử dụng K-fold thì thấy mô hình phù hợp nhất cho dữ liệu là lqd và mutinomial logistic.
+
+####################### các mô hình không có trong bài học
+
+############ Decision Tree  
+
+
+# Xây dựng mô hình Decision Tree
+tree_model <- rpart(class ~ ., data = data, method = "class")
+rpart.plot(tree_model)
+
+# Dự đoán trên toàn bộ dữ liệu
+tree_pred <- predict(tree_model, newdata = data, type = "class")
+
+# Ma trận nhầm lẫn
+conf_matrix_tree <- table(data$class, tree_pred)
+
+# Đánh giá mô hình
+eval_multi_class(conf_matrix_tree)
+
+# nhận xét mô hình Decision Trê có độ chính xác thấp cho bộ dữ liệu này
+
+############ XGBoost
+
+# Chuyển đổi dữ liệu thành dạng ma trận sparse
+sparse_matrix <- sparse.model.matrix(class ~ . - 1, data = data)
+label_vector <- as.numeric(data$class) - 1  # XGBoost yêu cầu nhãn dạng số từ 0 trở lên
+
+# Xây dựng tập dữ liệu DMatrix
+dtrain <- xgb.DMatrix(data = sparse_matrix, label = label_vector)
+
+# Thiết lập tham số mô hình
+params <- list(
+  objective = "multi:softmax",
+  num_class = length(unique(data$class)),  # Số lượng lớp
+  eval_metric = "mlogloss",
+  max_depth = 6,
+  eta = 0.3
+)
+
+# Huấn luyện mô hình XGBoost
+xgb_model <- xgb.train(
+  params = params,
+  data = dtrain,
+  nrounds = 100
+)
+
+# Dự đoán trên toàn bộ dữ liệu
+xgb_pred <- predict(xgb_model, newdata = dtrain)
+xgb_pred <- as.factor(xgb_pred)  # Chuyển về dạng factor để so sánh
+
+# Ma trận nhầm lẫn
+conf_matrix_xgb <- table(data$class, xgb_pred)
+
+# Đánh giá mô hình
+eval_multi_class(conf_matrix_xgb)
+
+# Nhận thấy XGboost có độ chính xác rất cao, lên đến 95% Accuracy, 93% Kappa, 94% F1 cho thấy các chỉ số đều tốt
+# về Precision và recall thì ở Class B có thấp hơn so với các class còn lại một chút những 92% vẫn là rất tốt.
+
+
+
+############ Random Forest
+
+# Xây dựng mô hình Random Forest
+set.seed(123)  # Đặt seed để kết quả có thể tái lập
+rf_model <- randomForest(class ~ ., data = data, ntree = 100, mtry = sqrt(ncol(data) - 1), importance = TRUE)
+
+# Xem thông tin mô hình
+print(rf_model)
+
+# Dự đoán trên toàn bộ dữ liệu
+rf_pred <- predict(rf_model, newdata = data)
+
+# Ma trận nhầm lẫn
+conf_matrix_rf <- table(data$class, rf_pred)
+
+# Đánh giá mô hình
+eval_multi_class(conf_matrix_rf)
+
+# Tầm quan trọng của các biến
+importance(rf_model)
+varImpPlot(rf_model)
+
+
+# Random forest chính xác nhất ( dựa trên đánh giá lần train này vì các chỉ số đều 1 hết)
+# Kiểm tra lại bằng K-fold
+
+rf_model <- train(class ~ ., data = data, 
+                  method = "rf",  
+                  trControl = train_control)
+
+# In kết quả
+print(rf_model)
+print(rf_model$resample)  # In ra thông tin chi tiết của từng fold
+
+# sau khi thực hiện K-fold thì thấy Accuray chỉ khoảng 74% và kappa ở tầm 66% khá tốt, thấp hơn lần trước có thể là do sự ngẫu nhiên hoặc mô hình trước bị overfit
+# Các chỉ số của các fold đều chênh lệch nhau không quá nhiều 
+# Sử dụng mtry =18 hoặc =10 có vẻ là sự lựa chọn tốt.
